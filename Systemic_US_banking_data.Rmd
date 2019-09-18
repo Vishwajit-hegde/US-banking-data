@@ -1,0 +1,303 @@
+---
+title: "US_banking_data"
+author: "Vishwajit Hegde"
+output:
+  pdf_document:
+    keep_tex: false
+citation_package: natbib
+documentclass: article
+fontsize: 11pt
+geometry: margin = 1.5in
+header-includes: \linespread{1.25}
+linkcolor: blue
+citecolor: magenta
+urlcolor: red
+---
+
+```{r setup, eval=T, message=FALSE, warning=F, include=FALSE, echo=F}
+
+library(tidyverse)
+library(rmarkdown)
+library(knitr)
+library(xml2)
+library(gapminder)
+library(tseries)
+library(lubridate)
+library(xts)
+library(forecast)
+library(lmtest)
+library(quantmod)
+library(sandwich)
+knitr::opts_chunk$set(echo = T, 
+                      warning = F, 
+                      message = F, 
+                      eval = T, 
+                      include = T
+                      )
+```
+# Importing data from the csv file
+Data of US banks with more than 1 Billion asset are read from the csv file.
+```{r data_import}
+US_banking_df <- read_csv('US_Banks_1B.csv')
+US_banking_df$date <- as.Date(US_banking_df$date)
+US_banking_df$day <- weekdays(US_banking_df$date)
+
+US_banking_df <- US_banking_df %>%
+  mutate(comnam = if_else(comnam == "JPMORGAN CHASE & CO","J P MORGAN CHASE & CO",comnam)) 
+#same bank with different names
+
+
+```
+# Updating the qtr_num
+The variable qtr_num is updates based on the quarter to which the observation belongs.
+**%/%** is used for integer division. If the month number is divisible by 3, the quotient is the quarter number. Otherwise it is integer part of the quotient plus 1.
+```{r qtr_num, eval=T}
+US_banking_df <- US_banking_df %>%
+  mutate(qtr_num = if_else(month(date)%%3 == 0, month(date)/3, month(date)%/%3 + 1))
+```
+# Grouping based on bank names and year
+We run the autoregression separately on daily returns of individual banks belonging to a year. To do that, first we need to group them based on **year** and **comnam**(name of the bank). Daily returns belonging to each year and bank are nested in the variable **data**.
+```{r grouping}
+US_banking_df <- US_banking_df %>%
+  mutate(year = year(date))
+US_banking_df <- US_banking_df %>%
+  mutate(month = month(date))
+US_banking_annual <- US_banking_df %>%
+  group_by(comnam, year) %>%
+  nest(ret, date, day)
+US_banking_monthly <- US_banking_df %>%
+  group_by(comnam,year) %>%
+  nest(ret,month)
+US_bank_summary <- US_banking_df %>%
+  group_by(comnam,year) %>%
+  nest(ret)
+for (i in 1:length(US_banking_monthly$data)){
+  US_banking_monthly$data[[i]] <- US_banking_monthly$data[[i]] %>%
+    group_by(month) %>%
+    nest(ret)
+}
+
+head(US_banking_annual)
+```
+
+
+
+# Systemically Important US banks
+Here is a list of domestic systemically important banks in USA. We will be checking for their presence in our list. If they exist we will check for any significant first order autocorrelation. If it exists, we will calculate the difference between first order autocorrelation and the significance level.
+
+## Domestic Systemically Important Banks in US
+1.Ally Financial
+2.American Express
+3.BB & T
+4.BBVA Compass
+5.BMO Financial Corp
+6.Capital One Financial
+7.Comerica
+8.Discover Financial Services
+9.Fifth Third Bank
+10.HSBC North America Holdings
+11.Huntington Bancshares
+12.KeyCorp
+13.M&T Bank
+14.MetLife
+15.Northern Trust
+16.PNC Financial Services
+17.RBS Citizens Financial Group
+18.Regions Financial
+19.Santander Holdings USA	
+20.SunTrust Banks
+21.U.S. Bancorp
+22.UnionBanCal
+23.Zions
+
+## Global Systemically Important Banks in US:
+1.Bank Of America
+2.Bank of New York Mellon
+3.Citigroup
+4.Goldman Sachs
+5.JP Morgan Chase
+6.Morgan Stanley
+7.State Street
+8.Wells Fargo
+
+We manually search for the above banks in our dataframe(reason being, the names can be somewhat different in our dataframe). The names are listed as a vector. **systemic_US_banks** is the filtered dataframe consisting of the banks in the vector **banks_US**.
+```{r systemic}
+banks_US <- str_to_upper(c("B B & T corp","comerica inc",
+                           "Bank of America corp",
+                           "Bank of New York Mellon Corp",
+                           "Fifth Third Bancorp",
+                           "Huntington Bancshares inc",
+                           "J P Morgan Chase & Co",
+                           "JPMorgan Chase & Co",
+                           "KeyCorp","KeyCorp New",
+                           "M & T Bank Corp",
+                           "Northern Trust Corp",
+                           "PNC Financial Services Grp inc",
+                           "SUNTRUST BANKS INC",
+                           "STATE STREET CORP",
+                           "USBANCORP INC PA",
+                           "WELLS FARGO & CO NEW",
+                           "ZIONS BANCORPORATION",
+                           "STATE STREET BOSTON CORP"))
+
+systemic_banks_weekly <- US_banking_annual %>%
+  filter(comnam %in% banks_US)
+
+systemic_banks_monthly <- US_banking_monthly %>%
+  filter(comnam %in% banks_US)
+
+systemic_US_banks <- US_bank_summary %>%
+  filter(comnam %in% banks_US)
+
+```
+# Calculating Weekly Returns
+```{r weekly_ret,warning=F}
+# numbering the weeks using the 'day' values
+for (i in 1:length(systemic_banks_weekly$data)){
+   w <- 1
+ for(j in 1:length(systemic_banks_weekly$data[[i]]$date))
+   {
+   systemic_banks_weekly$data[[i]]$week_num[[j]] <- w
+   if(systemic_banks_weekly$data[[i]]$day[[j]] == "Friday"){
+     w <- w + 1
+   }
+ } 
+}
+# using the week_num to nest the returns(view the tibble for getting better idea)
+for (i in 1:length(systemic_banks_weekly$data)){
+   systemic_banks_weekly$data[[i]] <- systemic_banks_weekly$data[[i]] %>%
+     group_by(week_num) %>%
+     nest(ret) }
+
+for (i in 1:length(systemic_banks_weekly$data)){  
+   for(j in 1:length(systemic_banks_weekly$data[[i]]$week_num)){
+     r <- 1
+     for (k in 1:length(systemic_banks_weekly$data[[i]]$data[[j]]$ret)){
+       r <-  r * (1 + systemic_banks_weekly$data[[i]]$data[[j]]$ret[[k]])
+     }
+     systemic_banks_weekly$data[[i]]$ret_weekly[[j]] <- r - 1
+   }
+}
+```
+# Calculating Monthly Returns
+```{r monthly_ret}
+for (i in 1:length(systemic_banks_monthly$data)){  
+   for(j in 1:length(systemic_banks_monthly$data[[i]]$month)){
+     r <- 1
+     for (k in 1:length(systemic_banks_monthly$data[[i]]$data[[j]]$ret)){
+       r <-  r * (1 + systemic_banks_monthly$data[[i]]$data[[j]]$ret[[k]])
+     }
+     systemic_banks_monthly$data[[i]]$ret_monthly[[j]] <- r - 1
+   }
+}
+```
+# Autoregression of first order(AR(1)) on daily frequency returns
+We first calculated the daily returns lagged by an order of 1. We run the linear regression of the level data with lagged data. We then tabulate the first order coefficient and the corresponding p-value.
+```{r autorgression}
+for (i in 1:length(systemic_US_banks$data)){
+  return <- systemic_US_banks$data[[i]][[1]]
+  N <- length(return)
+  return[[N+1]] <- NA
+  systemic_US_banks$data[[i]] <- systemic_US_banks$data[[i]] %>%
+    mutate(return_level = return[-1], return_lags = return[-N])
+}
+coef_test <- list()
+first_order_coef <- list()
+intercept <- list()
+p_value <- list()
+lm_plot <- list()
+R_squared <- vector()
+for (i in 1:length(systemic_US_banks$data)){
+  ret_level <- systemic_US_banks$data[[i]][[2]]
+  ret_lags <- systemic_US_banks$data[[i]][[3]]
+  if(length(systemic_US_banks$data[[i]][[1]])>5){
+    armod <- lm(ret_level ~ ret_lags,na.action = na.exclude)
+    R_squared[i] <- summary(armod)$r.squared
+    coef_test[[i]] <- coeftest(armod, vcov. = vcovHC, type = "HC1")
+    #require sandwich package for vcovHC
+    intercept[[i]] <- coef_test[[i]][[1]]
+    first_order_coef[[i]] <- coef_test[[i]][[2]]
+    p_value[[i]] <- coef_test[[i]][[8]]
+  }
+}
+
+systemic_US_banks <- systemic_US_banks %>%
+  mutate(coef_test,first_order_coef,p_value,intercept,R_squared)
+```
+# Autoregression of first order(AR(1)) on weekly frequency returns
+```{r AR_weekly}
+for (i in 1:length(systemic_banks_weekly$data)){
+  return <- systemic_banks_weekly$data[[i]][[3]]
+  N <- length(return)
+  return[[N+1]] <- NA
+  systemic_banks_weekly$data[[i]] <- systemic_banks_weekly$data[[i]] %>%
+    mutate(return_level = return[-1], return_lags = return[-N])
+}
+coef_test <- list()
+first_order_coef <- list()
+intercept <- list()
+p_value <- list()
+lm_plot <- list()
+R_squared <- vector()
+for (i in 1:length(systemic_banks_weekly$data)){
+  ret_level <- systemic_banks_weekly$data[[i]][[4]]
+  ret_lags <- systemic_banks_weekly$data[[i]][[5]]
+  if(length(systemic_banks_weekly$data[[i]][[1]])>5){
+    armod <- lm(ret_level ~ ret_lags)
+    R_squared[i] <- summary(armod)$r.squared
+    coef_test[[i]] <- coeftest(armod, vcov. = vcovHC, type = "HC1")
+    #require sandwich package for vcovHC
+    intercept[[i]] <- coef_test[[i]][[1]]
+    first_order_coef[[i]] <- coef_test[[i]][[2]]
+    p_value[[i]] <- coef_test[[i]][[8]]
+  }
+}
+
+systemic_banks_weekly <- systemic_banks_weekly %>%
+  mutate(coef_test,first_order_coef,p_value,intercept,R_squared)
+```
+# Autoregression of first order(AR(1)) on monthly frequency returns
+```{r AR_monthly}
+for (i in 1:length(systemic_banks_monthly$data)){
+  return <- systemic_banks_monthly$data[[i]][[3]]
+  N <- length(return)
+  return[[N+1]] <- NA
+  systemic_banks_monthly$data[[i]] <- systemic_banks_monthly$data[[i]] %>%
+    mutate(return_level = return[-1], return_lags = return[-N])
+}
+
+for (i in 1:length(systemic_banks_monthly$data)){
+  ret_level <- systemic_banks_monthly$data[[i]][[4]]
+  ret_lags <- systemic_banks_monthly$data[[i]][[5]]
+  if(length(systemic_banks_monthly$data[[i]][[1]])>5){
+    armod <- lm(ret_level ~ ret_lags)
+    systemic_banks_monthly$R_squared[[i]] <- summary(armod)$r.squared
+    systemic_banks_monthly$coef_test[[i]] <- coeftest(armod, vcov. = vcovHC, type = "HC1")
+    #require sandwich package for vcovHC
+    systemic_banks_monthly$intercept[[i]] <- as.numeric(coef_test[[i]][[1]])
+    systemic_banks_monthly$first_order_coef[[i]] <- as.numeric(coef_test[[i]][[2]])
+    systemic_banks_monthly$p_value[[i]] <- as.numeric(coef_test[[i]][[8]])
+  }
+}
+for (i in 1:length(systemic_banks_monthly$first_order_coef)){
+  systemic_banks_monthly$first_order_coef[[i]] <- as.double(systemic_banks_monthly$first_order_coef[[i]])
+}
+for (i in 1:length(systemic_banks_monthly$p_value)){
+  systemic_banks_monthly$p_value[[i]] <- as.double(systemic_banks_monthly$p_value[[i]])
+}
+
+```
+#Summary
+```{r summary}
+systemic_US_banks %>%
+  group_by(comnam) %>%
+  summarise(avg_R_squared = mean(R_squared))
+
+systemic_US_banks <- systemic_US_banks %>%
+  mutate(comnam = if_else(comnam == "JPMORGAN CHASE & CO","J P MORGAN CHASE & CO",comnam))
+```
+
+
+
+
+
