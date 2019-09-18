@@ -1,4 +1,4 @@
-# US-banking-data-
+# US-banking-data
 Analysing the US banking data
 This was a project I worked on during my stay as intern in IIM Bangalore with Prof.Abhinav Anand. The project aimed to find a pattern 
 using the correlations in the returns among large banks and also autocorrelations in the returns of each bank and to hypothesize about their
